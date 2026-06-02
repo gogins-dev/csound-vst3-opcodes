@@ -23,9 +23,15 @@
 #define EVENT_TRACING 0
 
 // This one must come first to avoid conflict with Csound #defines.
+#include <chrono>
 #include <thread>
 
 #include <OpcodeBaseAC.hpp>
+
+namespace {
+constexpr int kPluginShutdownFlushBlocks = 16;
+constexpr int kPluginShutdownSettleMs = 400;
+}
 
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
@@ -387,6 +393,7 @@ struct vst3_plugin_t  {
 #if DEBUGGING
         std::fprintf(stderr, "vst3_plugin_t::~vst3_plugin_t.\n");
 #endif
+        terminate();
     }
     void preprocess(int64_t continousFrames) {
 #if PROCESS_TRACING
@@ -572,12 +579,61 @@ struct vst3_plugin_t  {
         csound->Message(csound, "vst3_plugin_t::initialize completed.\n");
         return true;
     }
-    void terminate() {
-        if (!processor) {
+    void send_all_notes_off() {
+        if (!processor || !isProcessing) {
             return;
         }
-        processor->setProcessing(false);
-        component->setActive(false);
+        for (int channel = 0; channel < 16; ++channel) {
+            Steinberg::Vst::Event event{};
+            event.busIndex = 0;
+            event.sampleOffset = 0;
+            event.type = Steinberg::Vst::Event::kLegacyMIDICCOutEvent;
+            event.midiCCOut.channel = static_cast<Steinberg::int8>(channel);
+            event.midiCCOut.controlNumber = 123;
+            event.midiCCOut.value = 0;
+            event.midiCCOut.value2 = 0;
+            inputEventList.addEvent(event);
+        }
+    }
+    void flush_silence() {
+        if (!processor || !isProcessing || blockSize <= 0) {
+            return;
+        }
+        inputEventList.clear();
+        outputEventList.clear();
+        inputParameterChanges.clearQueue();
+        outputParameterChanges.clearQueue();
+        process(processContext.continousTimeSamples);
+    }
+    void drain_before_shutdown() {
+        if (!processor || isTerminated) {
+            return;
+        }
+        send_all_notes_off();
+        for (int i = 0; i < kPluginShutdownFlushBlocks; ++i) {
+            flush_silence();
+        }
+        if (isProcessing) {
+            processor->setProcessing(false);
+            isProcessing = false;
+        }
+        if (component) {
+            component->setActive(false);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
+    }
+    void terminate() {
+        if (isTerminated || !processor) {
+            return;
+        }
+        drain_before_shutdown();
+        // Release PlugProvider last so ~PlugProvider can disconnect and
+        // call IComponent::terminate() / IEditController::terminate().
+        provider = nullptr;
+        processor = nullptr;
+        component = nullptr;
+        controller = nullptr;
+        isTerminated = true;
     }
     void initProcessData() {
         hostProcessData.inputEvents = &inputEventList;
@@ -973,6 +1029,7 @@ struct vst3_plugin_t  {
     //std::shared_ptr<Steinberg::Vst::EditorHost::WindowController> windowController;
     MidiCCMapping midiCCMapping;
     bool isProcessing = false;
+    bool isTerminated = false;
     double sampleRate = 0;
     int32 blockSize = 0;
     int32 plugin_sample_size;
@@ -985,6 +1042,13 @@ struct vst3_plugin_t  {
     std::string name;
 };
 
+namespace {
+// Keep terminated plugin instances (and their loaded modules) alive until
+// process exit so Pianoteq/Organteq background threads are not running in
+// unloaded DLLs after csoundModuleDestroy.
+std::vector<std::shared_ptr<vst3_plugin_t>> retained_vst3_plugins;
+}
+
 /**
  * Singleton class for managing all persistent VST3 state:
  * (1) There is one and only one vst3_host_t instance in a process.
@@ -994,13 +1058,38 @@ struct vst3_plugin_t  {
  */
 class vst3_host_t : public Steinberg::Vst::HostApplication {
     int host_handle;
+    bool plugins_shutdown = false;
 public:
     vst3_host_t() {
     };
     vst3_host_t(vst3_host_t const&) = delete;
     void operator=(vst3_host_t const&) = delete;
+    void shutdown_all_plugins() {
+        if (plugins_shutdown) {
+            return;
+        }
+        for (auto it = vst3_plugins_for_handles.rbegin();
+             it != vst3_plugins_for_handles.rend(); ++it) {
+            if (*it) {
+                (*it)->terminate();
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
+        retained_vst3_plugins.insert(retained_vst3_plugins.end(),
+                                     vst3_plugins_for_handles.begin(),
+                                     vst3_plugins_for_handles.end());
+        vst3_plugins_for_handles.clear();
+        // Do not clear modules_for_pathnames here: unloading the VST3 bundle
+        // while Pianoteq/Organteq helper threads are still running crashes.
+        plugins_shutdown = true;
+    }
     ~vst3_host_t() noexcept override {
+#if DEBUGGING
         std::fprintf(stderr, "vst3_host_t::~vst3_host_t.\n");
+#endif
+        shutdown_all_plugins();
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
+        modules_for_pathnames.clear();
     }
     /**
      * Loads a VST3 Module and obtains all plugins in it.
@@ -1783,6 +1872,11 @@ extern "C" {
         csound->Message(csound, "csoundModuleDestroy (vst3_opcodes): csound: %p...\n",
                         csound);
 //#endif
+        int handle = 0;
+        auto host = csound::vst3hosts::instance().object_for_handle(csound, handle);
+        if (host != nullptr) {
+            host->shutdown_all_plugins();
+        }
         csound::vst3hosts::instance().module_destroy(csound);
         csound->Message(csound, "csoundModuleDestroy (vst3_opcodes): csound: %p.\n", csound);
         return 0;
