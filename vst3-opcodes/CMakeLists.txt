@@ -19,6 +19,11 @@ option(ENABLE_TSAN "Enable ThreadSanitizer." OFF)
 option(CSOUND_AC_ENABLE_CODESIGN "Sign Mach-O artifacts in dist when credentials are available." OFF)
 option(CSOUND_AC_ENABLE_NOTARIZATION "Notarize the macOS distribution archive when credentials are available." OFF)
 
+set(CSOUND_AC_BASE_URL
+    "https://raw.githubusercontent.com/gogins-dev/csound-ac/refs/heads/master"
+    CACHE STRING "Base URL for refreshing shared files from the csound-ac repository."
+)
+
 set(CSOUND_VST3_OPCODE_SOURCE_DIR
     "${CMAKE_CURRENT_LIST_DIR}"
     CACHE PATH "Directory containing the vst3-opcodes sources."
@@ -68,83 +73,119 @@ message(STATUS "CSOUND_VST3_OPCODE_ARCHIVE: ${CSOUND_VST3_OPCODE_ARCHIVE}")
 message(STATUS "CSOUND_AC_ENABLE_CODESIGN: ${CSOUND_AC_ENABLE_CODESIGN}")
 message(STATUS "CSOUND_AC_ENABLE_NOTARIZATION: ${CSOUND_AC_ENABLE_NOTARIZATION}")
 
-message(STATUS "Refreshing shared files from csound-ac repository head...")
-
-set(csound_ac_refresh_dir "${CMAKE_BINARY_DIR}/csound-ac-refresh")
-file(MAKE_DIRECTORY "${csound_ac_refresh_dir}")
 file(MAKE_DIRECTORY "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake")
 
-file(DOWNLOAD
-    "https://raw.githubusercontent.com/gogins-dev/csound-ac/refs/heads/master/cmake/FindCsoundHomeFirst.cmake"
-    "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
-    STATUS find_csound_download_status
-    SHOW_PROGRESS
-)
+# Single source of truth: csound-ac (local checkout or downloaded master).
+set(_csound_ac_repo_root "")
+if(DEFINED ENV{CSOUND_AC_ROOT} AND NOT "$ENV{CSOUND_AC_ROOT}" STREQUAL "")
+    set(_csound_ac_repo_root "$ENV{CSOUND_AC_ROOT}")
+elseif(EXISTS "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/../csound-ac/cmake/FindCsoundHomeFirst.cmake")
+    get_filename_component(_csound_ac_repo_root
+        "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/../csound-ac" ABSOLUTE)
+endif()
 
-list(GET find_csound_download_status 0 find_csound_download_code)
+message(STATUS "Refreshing shared files from csound-ac...")
 
-if(find_csound_download_code EQUAL 0)
+if(_csound_ac_repo_root)
+    message(STATUS "Using local csound-ac checkout: ${_csound_ac_repo_root}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
+            "${_csound_ac_repo_root}/cmake/FindCsoundHomeFirst.cmake"
             "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake"
     )
-else()
-    list(GET find_csound_download_status 1 find_csound_download_message)
-    message(WARNING
-        "Failed to refresh FindCsoundHomeFirst.cmake from csound-ac head: "
-        "${find_csound_download_message}. Using local copy."
-    )
-endif()
-
-file(DOWNLOAD
-    "https://raw.githubusercontent.com/gogins-dev/csound-ac/refs/heads/master/CsoundAC/OpcodeBaseAC.hpp"
-    "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
-    STATUS opcode_base_download_status
-    SHOW_PROGRESS
-)
-
-list(GET opcode_base_download_status 0 opcode_base_download_code)
-
-if(opcode_base_download_code EQUAL 0)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
+            "${_csound_ac_repo_root}/CsoundAC/OpcodeBaseAC.hpp"
             "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp"
     )
+    if(EXISTS "${_csound_ac_repo_root}/external/codesign-check.bash")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_csound_ac_repo_root}/external/codesign-check.bash"
+                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+        )
+        execute_process(
+            COMMAND /bin/chmod +x
+                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+        )
+    endif()
 else()
-    list(GET opcode_base_download_status 1 opcode_base_download_message)
-    message(WARNING
-        "Failed to refresh OpcodeBaseAC.hpp from csound-ac head: "
-        "${opcode_base_download_message}. Using local copy."
-    )
-endif()
+    message(STATUS "Downloading shared files from: ${CSOUND_AC_BASE_URL}")
+    set(csound_ac_refresh_dir "${CMAKE_BINARY_DIR}/csound-ac-refresh")
+    file(MAKE_DIRECTORY "${csound_ac_refresh_dir}")
 
-file(DOWNLOAD
-    "https://raw.githubusercontent.com/gogins-dev/csound-ac/refs/heads/master/external/codesign-check.bash"
-    "${csound_ac_refresh_dir}/codesign-check.bash"
-    STATUS codesign_check_download_status
-    SHOW_PROGRESS
-)
+    file(DOWNLOAD
+        "${CSOUND_AC_BASE_URL}/cmake/FindCsoundHomeFirst.cmake"
+        "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
+        STATUS find_csound_download_status
+        SHOW_PROGRESS
+    )
 
-list(GET codesign_check_download_status 0 codesign_check_download_code)
+    list(GET find_csound_download_status 0 find_csound_download_code)
 
-if(codesign_check_download_code EQUAL 0)
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${csound_ac_refresh_dir}/codesign-check.bash"
-            "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+    if(find_csound_download_code EQUAL 0)
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
+                "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake"
+        )
+    else()
+        list(GET find_csound_download_status 1 find_csound_download_message)
+        message(WARNING
+            "Failed to refresh FindCsoundHomeFirst.cmake from csound-ac: "
+            "${find_csound_download_message}. Using existing copy in vst3-opcodes/cmake/."
+        )
+    endif()
+
+    file(DOWNLOAD
+        "${CSOUND_AC_BASE_URL}/CsoundAC/OpcodeBaseAC.hpp"
+        "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
+        STATUS opcode_base_download_status
+        SHOW_PROGRESS
     )
-    execute_process(
-        COMMAND /bin/chmod +x
-            "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+
+    list(GET opcode_base_download_status 0 opcode_base_download_code)
+
+    if(opcode_base_download_code EQUAL 0)
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
+                "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp"
+        )
+    else()
+        list(GET opcode_base_download_status 1 opcode_base_download_message)
+        message(WARNING
+            "Failed to refresh OpcodeBaseAC.hpp from csound-ac: "
+            "${opcode_base_download_message}. Using existing OpcodeBaseAC.hpp."
+        )
+    endif()
+
+    file(DOWNLOAD
+        "${CSOUND_AC_BASE_URL}/external/codesign-check.bash"
+        "${csound_ac_refresh_dir}/codesign-check.bash"
+        STATUS codesign_check_download_status
+        SHOW_PROGRESS
     )
-else()
-    list(GET codesign_check_download_status 1 codesign_check_download_message)
-    message(WARNING
-        "Failed to refresh codesign-check.bash from csound-ac head: "
-        "${codesign_check_download_message}. Using local copy if present."
-    )
+
+    list(GET codesign_check_download_status 0 codesign_check_download_code)
+
+    if(codesign_check_download_code EQUAL 0)
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${csound_ac_refresh_dir}/codesign-check.bash"
+                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+        )
+        execute_process(
+            COMMAND /bin/chmod +x
+                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+        )
+    else()
+        list(GET codesign_check_download_status 1 codesign_check_download_message)
+        message(WARNING
+            "Failed to refresh codesign-check.bash from csound-ac: "
+            "${codesign_check_download_message}. Using existing copy if present."
+        )
+    endif()
 endif()
 
 include("${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake")
@@ -158,6 +199,16 @@ message(STATUS "Using Csound library:       ${CSOUND_LIBRARY}")
 message(STATUS "Using Csound include dirs:  ${CSOUND_INCLUDE_DIRS}")
 message(STATUS "Using Csound framework dir: ${CSOUND_FRAMEWORK_DIR}")
 message(STATUS "Using Csound version:       ${CSOUND_VERSION}")
+
+if(NOT CSOUND_VERSION_MAJOR)
+    message(FATAL_ERROR
+        "Could not determine Csound major version for compile definitions. "
+        "Install Csound or pass -DCSOUND_VERSION_MAJOR=7 -DCSOUND_VERSION_MINOR=0.")
+endif()
+
+if(NOT CSOUND_VERSION_MINOR)
+    set(CSOUND_VERSION_MINOR 0)
+endif()
 
 set(_csound_resolved_include_dirs "")
 foreach(_csound_include_dir IN LISTS CSOUND_INCLUDE_DIRS)

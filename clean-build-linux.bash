@@ -17,6 +17,7 @@ then
 fi
 
 rm -rf "${build_dir}" "${install_dir}"
+"${repo_root}/update-csound-ac-files.bash"
 cmake -S "${repo_root}/vst3-opcodes" -B "${build_dir}" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_INSTALL_PREFIX="${install_dir}" \
