@@ -30,7 +30,8 @@
 
 namespace {
 constexpr int kPluginShutdownFlushBlocks = 16;
-constexpr int kPluginShutdownSettleMs = 400;
+// Time for Pianoteq/Organteq background threads after deactivate (not terminate).
+constexpr int kPluginDeactivateSettleMs = 2000;
 }
 
 #include "pluginterfaces/gui/iplugview.h"
@@ -393,7 +394,9 @@ struct vst3_plugin_t  {
 #if DEBUGGING
         std::fprintf(stderr, "vst3_plugin_t::~vst3_plugin_t.\n");
 #endif
-        terminate();
+        if (!host_reset_deactivated) {
+            terminate();
+        }
     }
     void preprocess(int64_t continousFrames) {
 #if PROCESS_TRACING
@@ -620,7 +623,22 @@ struct vst3_plugin_t  {
         if (component) {
             component->setActive(false);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginDeactivateSettleMs));
+    }
+    // Stop audio/MIDI processing but do not call IComponent::terminate() or
+    // release the PlugProvider. Pianoteq/Organteq JUCE timer threads crash if
+    // the plugin is terminated while csoundModuleDestroy is still unwinding.
+    void deactivate_for_host_reset() {
+        if (host_reset_deactivated || isTerminated || !processor) {
+            return;
+        }
+        if (csound) {
+            csound->Message(csound,
+                            "vst3_plugin_t::deactivate_for_host_reset: %s\n",
+                            name.c_str());
+        }
+        drain_before_shutdown();
+        host_reset_deactivated = true;
     }
     void terminate() {
         if (isTerminated || !processor) {
@@ -1030,6 +1048,7 @@ struct vst3_plugin_t  {
     MidiCCMapping midiCCMapping;
     bool isProcessing = false;
     bool isTerminated = false;
+    bool host_reset_deactivated = false;
     double sampleRate = 0;
     int32 blockSize = 0;
     int32 plugin_sample_size;
@@ -1043,11 +1062,10 @@ struct vst3_plugin_t  {
 };
 
 namespace {
-// Keep terminated plugin instances (and their loaded modules) alive until
-// process exit so Pianoteq/Organteq background threads are not running in
-// unloaded DLLs after csoundModuleDestroy.
+// Plugins deactivated (not terminated) at csoundModuleDestroy; kept alive so
+// VST3 bundles and plugin threads stay valid until process exit.
 std::vector<std::shared_ptr<vst3_plugin_t>> retained_vst3_plugins;
-}
+} // namespace
 
 /**
  * Singleton class for managing all persistent VST3 state:
@@ -1071,16 +1089,15 @@ public:
         for (auto it = vst3_plugins_for_handles.rbegin();
              it != vst3_plugins_for_handles.rend(); ++it) {
             if (*it) {
-                (*it)->terminate();
+                (*it)->deactivate_for_host_reset();
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginDeactivateSettleMs));
         retained_vst3_plugins.insert(retained_vst3_plugins.end(),
                                      vst3_plugins_for_handles.begin(),
                                      vst3_plugins_for_handles.end());
         vst3_plugins_for_handles.clear();
-        // Do not clear modules_for_pathnames here: unloading the VST3 bundle
-        // while Pianoteq/Organteq helper threads are still running crashes.
+        // Do not clear modules_for_pathnames: the .vst3 bundle must stay mapped.
         plugins_shutdown = true;
     }
     ~vst3_host_t() noexcept override {
@@ -1088,8 +1105,6 @@ public:
         std::fprintf(stderr, "vst3_host_t::~vst3_host_t.\n");
 #endif
         shutdown_all_plugins();
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginShutdownSettleMs));
-        modules_for_pathnames.clear();
     }
     /**
      * Loads a VST3 Module and obtains all plugins in it.
