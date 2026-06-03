@@ -24,6 +24,8 @@
 
 // This one must come first to avoid conflict with Csound #defines.
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 
 #include <OpcodeBaseAC.hpp>
@@ -394,7 +396,7 @@ struct vst3_plugin_t  {
 #if DEBUGGING
         std::fprintf(stderr, "vst3_plugin_t::~vst3_plugin_t.\n");
 #endif
-        if (!host_reset_deactivated) {
+        if (!host_reset_detached && !host_reset_deactivated) {
             terminate();
         }
     }
@@ -556,6 +558,7 @@ struct vst3_plugin_t  {
         csound = csound_;
         provider = provider_;
         classInfo = classInfo_;
+        name = classInfo.name();
         component_class_id = Steinberg::FUID{ classInfo.ID().data() };
         processor_class_id = component_class_id;
         component = provider->getComponent();
@@ -626,10 +629,9 @@ struct vst3_plugin_t  {
         std::this_thread::sleep_for(std::chrono::milliseconds(kPluginDeactivateSettleMs));
     }
     // Stop audio/MIDI processing but do not call IComponent::terminate() or
-    // release the PlugProvider. Pianoteq/Organteq JUCE timer threads crash if
-    // the plugin is terminated while csoundModuleDestroy is still unwinding.
+    // release the PlugProvider. Used only when CSOUND_VST3_SHUTDOWN=deactivate.
     void deactivate_for_host_reset() {
-        if (host_reset_deactivated || isTerminated || !processor) {
+        if (host_reset_deactivated || host_reset_detached || isTerminated || !processor) {
             return;
         }
         if (csound) {
@@ -639,6 +641,20 @@ struct vst3_plugin_t  {
         }
         drain_before_shutdown();
         host_reset_deactivated = true;
+    }
+    // Detach from Csound handles without calling setActive(false) or terminate().
+    // Pianoteq/Organteq JUCE timer threads crash when the host deactivates or
+    // terminates the plugin while Csound is resetting.
+    void detach_for_host_reset() {
+        if (host_reset_detached || isTerminated) {
+            return;
+        }
+        if (csound) {
+            csound->Message(csound,
+                            "vst3_plugin_t::detach_for_host_reset: %s\n",
+                            name.c_str());
+        }
+        host_reset_detached = true;
     }
     void terminate() {
         if (isTerminated || !processor) {
@@ -1049,6 +1065,7 @@ struct vst3_plugin_t  {
     bool isProcessing = false;
     bool isTerminated = false;
     bool host_reset_deactivated = false;
+    bool host_reset_detached = false;
     double sampleRate = 0;
     int32 blockSize = 0;
     int32 plugin_sample_size;
@@ -1086,13 +1103,23 @@ public:
         if (plugins_shutdown) {
             return;
         }
+        const char *shutdown_mode = std::getenv("CSOUND_VST3_SHUTDOWN");
+        const bool use_deactivate = shutdown_mode
+            && (std::strcmp(shutdown_mode, "deactivate") == 0
+                || std::strcmp(shutdown_mode, "full") == 0);
         for (auto it = vst3_plugins_for_handles.rbegin();
              it != vst3_plugins_for_handles.rend(); ++it) {
             if (*it) {
-                (*it)->deactivate_for_host_reset();
+                if (use_deactivate) {
+                    (*it)->deactivate_for_host_reset();
+                } else {
+                    (*it)->detach_for_host_reset();
+                }
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPluginDeactivateSettleMs));
+        if (use_deactivate) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPluginDeactivateSettleMs));
+        }
         retained_vst3_plugins.insert(retained_vst3_plugins.end(),
                                      vst3_plugins_for_handles.begin(),
                                      vst3_plugins_for_handles.end());
