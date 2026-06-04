@@ -1079,10 +1079,20 @@ struct vst3_plugin_t  {
 };
 
 namespace {
-// Plugins deactivated (not terminated) at csoundModuleDestroy; kept alive so
-// VST3 bundles and plugin threads stay valid until process exit.
+// Plugins detached at csoundModuleDestroy and kept until process exit so JUCE
+// background threads (e.g. Pianoteq) are not torn down while still running.
+// When non-empty after destroy, csoundModuleDestroy calls std::_Exit(0) unless
+// CSOUND_VST3_STAY_ALIVE=1 (for hosts that reuse one process for many renders).
 std::vector<std::shared_ptr<vst3_plugin_t>> retained_vst3_plugins;
 } // namespace
+
+/** Called from csoundModuleDestroy (global extern "C") after plugin shutdown. */
+bool vst3_should_quick_exit_process() {
+    if (std::getenv("CSOUND_VST3_STAY_ALIVE") != nullptr) {
+        return false;
+    }
+    return !retained_vst3_plugins.empty();
+}
 
 /**
  * Singleton class for managing all persistent VST3 state:
@@ -1919,8 +1929,14 @@ extern "C" {
         if (host != nullptr) {
             host->shutdown_all_plugins();
         }
-        csound::vst3hosts::instance().module_destroy(csound);
         csound->Message(csound, "csoundModuleDestroy (vst3_opcodes): csound: %p.\n", csound);
+        if (csound::vst3_should_quick_exit_process()) {
+            csound->Message(csound,
+                            "vst3_opcodes: VST3 plugins were loaded; exiting process "
+                            "(set CSOUND_VST3_STAY_ALIVE=1 to keep the process alive).\n");
+            std::_Exit(0);
+        }
+        csound::vst3hosts::instance().module_destroy(csound);
         return 0;
     }
 } // extern "C"
