@@ -276,6 +276,7 @@ jobs:
             -DINSTALL_PYTHON_INTERFACE=OFF `
             -DBUILD_PYTHON_OPCODES=OFF `
             -DUSE_PYTHON=OFF `
+            -DUSE_JACK=OFF `
             -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --config Release --parallel

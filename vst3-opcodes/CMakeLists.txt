@@ -76,9 +76,8 @@ message(STATUS "CSOUND_AC_ENABLE_NOTARIZATION: ${CSOUND_AC_ENABLE_NOTARIZATION}"
 file(MAKE_DIRECTORY "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake")
 
 # FindCsoundHomeFirst.cmake and OpcodeBaseAC.hpp: canonical source is csound-ac
-# (master). Vendored copies in this repo are offline fallbacks. On configure and
-# before each build, refresh from GitHub and replace those copies when download
-# succeeds.
+# (master). Vendored copies in this repo are offline fallbacks. Refresh from
+# GitHub at configure time and replace those copies when download succeeds.
 set(_find_csound_home_first_cmake "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake")
 set(_opcode_base_ac_hpp "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp")
 
@@ -116,10 +115,12 @@ if(_csound_ac_repo_root)
             "${_csound_ac_repo_root}/external/codesign-check.bash"
             "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
     )
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E chmod +x
-            "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
-    )
+    if(UNIX)
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E chmod +x
+                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+        )
+    endif()
 else()
     set(csound_ac_refresh_dir "${CMAKE_BINARY_DIR}/csound-ac-refresh")
     file(MAKE_DIRECTORY "${csound_ac_refresh_dir}")
@@ -136,10 +137,12 @@ else()
                 "${csound_ac_refresh_dir}/codesign-check.bash"
                 "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
         )
-        execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E chmod +x
-                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
-        )
+        if(UNIX)
+            execute_process(
+                COMMAND "${CMAKE_COMMAND}" -E chmod +x
+                    "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
+            )
+        endif()
     else()
         list(GET codesign_check_download_status 1 codesign_check_download_message)
         message(WARNING
@@ -194,6 +197,11 @@ set(vst3sdk_SOURCE_DIR
     "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/vst3sdk"
     CACHE PATH "Steinberg VST3 SDK source directory."
 )
+
+# We only link the SDK libraries; skip Steinberg sample plug-ins and hosting tools
+# (audiohost pulls in JACK on platforms where it is installed).
+set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${vst3sdk_SOURCE_DIR}" "${PROJECT_BINARY_DIR}/vst3sdk")
 smtg_enable_vst3_sdk()
@@ -261,22 +269,7 @@ elseif(SMTG_WIN)
     )
 endif()
 
-string(CONCAT _finder_url_arg "-DURL=" "${CSOUND_AC_BASE_URL}/cmake/FindCsoundHomeFirst.cmake")
-string(CONCAT _finder_dst_arg "-DDST=" "${_find_csound_home_first_cmake}")
-string(CONCAT _opcode_url_arg "-DURL=" "${CSOUND_AC_BASE_URL}/CsoundAC/OpcodeBaseAC.hpp")
-string(CONCAT _opcode_dst_arg "-DDST=" "${_opcode_base_ac_hpp}")
-add_custom_target(
-    csound_ac_fetch_files
-    COMMAND "${CMAKE_COMMAND}" "${_finder_url_arg}" "${_finder_dst_arg}"
-            -P "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FetchCsoundACFile.cmake"
-    COMMAND "${CMAKE_COMMAND}" "${_opcode_url_arg}" "${_opcode_dst_arg}"
-            -P "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FetchCsoundACFile.cmake"
-    COMMENT "Refresh FindCsoundHomeFirst.cmake and OpcodeBaseAC.hpp from csound-ac GitHub head"
-    VERBATIM
-)
-
 add_library(vst3_plugins MODULE ${vst3_plugins_sources})
-add_dependencies(vst3_plugins csound_ac_fetch_files)
 smtg_target_setup_universal_binary(vst3_plugins)
 
 target_link_libraries(vst3_plugins
