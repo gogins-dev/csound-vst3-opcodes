@@ -198,8 +198,7 @@ set(vst3sdk_SOURCE_DIR
     CACHE PATH "Steinberg VST3 SDK source directory."
 )
 
-# We only link the SDK libraries; skip Steinberg sample plug-ins and hosting tools
-# (audiohost pulls in JACK on platforms where it is installed).
+# We only link the SDK libraries; skip Steinberg sample plug-ins and hosting tools.
 set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
 

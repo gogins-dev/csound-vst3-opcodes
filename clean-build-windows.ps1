@@ -34,9 +34,19 @@ if (-not $csoundLib) {
     throw "Could not find csound64.lib under $csoundPrefix"
 }
 
-$prefixPath = $csoundPrefix
+$prefixPath = @($csoundPrefix)
+$jackRoot = @(
+    (Join-Path $env:ProgramFiles "JACK2"),
+    (Join-Path ${env:ProgramFiles(x86)} "JACK2")
+) | Where-Object { Test-Path (Join-Path $_ "include\jack\jack.h") } | Select-Object -First 1
+if ($jackRoot) {
+    $prefixPath += (Split-Path $jackRoot -Parent)
+} else {
+    Write-Warning "JACK2 not found; install with: winget install -e --id Jackaudio.JACK2"
+}
 $vcpkgInstalled = Join-Path $csoundPrefix "..\vcpkg_installed\x64-windows"
-if (Test-Path $vcpkgInstalled) { $prefixPath = "$csoundPrefix;$vcpkgInstalled" }
+if (Test-Path $vcpkgInstalled) { $prefixPath += $vcpkgInstalled }
+$prefixPath = $prefixPath -join ";"
 
 cmake -S (Join-Path $repoRoot "vst3-opcodes") -B $buildDir `
     -G "Visual Studio 17 2022" -A x64 `

@@ -60,6 +60,7 @@ jobs:
             ccache \
             pkg-config \
             libsndfile \
+            jack \
             bison \
             flex
 
@@ -112,6 +113,18 @@ jobs:
         shell: pwsh
         run: |
           choco install -y winflexbison3 7zip
+          winget install -e --id Jackaudio.JACK2 --silent `
+            --accept-package-agreements --accept-source-agreements
+          $jackRoot = @(
+            (Join-Path $env:ProgramFiles "JACK2"),
+            (Join-Path ${env:ProgramFiles(x86)} "JACK2")
+          ) | Where-Object { Test-Path (Join-Path $_ "include\jack\jack.h") } | Select-Object -First 1
+          if (-not $jackRoot) {
+            throw "JACK2 headers not found after install (expected under Program Files\JACK2)."
+          }
+          $jackPrefix = Split-Path $jackRoot -Parent
+          Add-Content -Path $env:GITHUB_ENV -Value "JACK2_CMAKE_PREFIX=$jackPrefix"
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$jackRoot;$env:PATH"
 
       - name: Resolve Csound develop commit
         id: csound-source
@@ -276,7 +289,6 @@ jobs:
             -DINSTALL_PYTHON_INTERFACE=OFF `
             -DBUILD_PYTHON_OPCODES=OFF `
             -DUSE_PYTHON=OFF `
-            -DUSE_JACK=OFF `
             -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --config Release --parallel
@@ -404,6 +416,7 @@ jobs:
           }
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
           $prefixPath = @($env:CSOUND_INSTALL_PREFIX)
+          if ($env:JACK2_CMAKE_PREFIX) { $prefixPath += $env:JACK2_CMAKE_PREFIX }
           if (Test-Path $vcpkg) { $prefixPath += $vcpkg }
           cmake -S vst3-opcodes -B build-windows `
             -G "Visual Studio 17 2022" -A x64 `
