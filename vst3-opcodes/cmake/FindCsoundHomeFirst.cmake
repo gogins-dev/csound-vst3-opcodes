@@ -10,11 +10,18 @@
 #   5. /usr/local
 #   6. /opt/homebrew
 #
-# Search order elsewhere:
-#   1. $HOME
-#   2. /usr/local
-#   3. /opt/homebrew
-#   4. /usr
+# Search order on Windows:
+#   1. CSOUND_ROOT_HINT (if set)
+#   2. %USERPROFILE% or %HOME%
+#   3. C:/Program Files/Csound
+#   4. C:/Program Files (x86)/Csound
+#
+# Search order on Linux and other Unix:
+#   1. CSOUND_ROOT_HINT (if set)
+#   2. $HOME
+#   3. /usr/local
+#   4. /opt/homebrew
+#   5. /usr
 #
 # Sets:
 #   CSOUND_FOUND
@@ -39,6 +46,11 @@ if(NOT DEFINED FIND_CSOUND_HOME_FIRST_REQUIRED)
 endif()
 
 set(_csound_home "$ENV{HOME}")
+if(WIN32 AND (NOT _csound_home OR _csound_home STREQUAL ""))
+    if(DEFINED ENV{USERPROFILE} AND NOT "$ENV{USERPROFILE}" STREQUAL "")
+        set(_csound_home "$ENV{USERPROFILE}")
+    endif()
+endif()
 
 set(_csound_search_roots)
 if(DEFINED CSOUND_ROOT_HINT AND NOT CSOUND_ROOT_HINT STREQUAL "")
@@ -80,11 +92,15 @@ if(APPLE)
     )
 endif()
 
-list(PREPEND CMAKE_PREFIX_PATH
-    "${_csound_home}"
-    "/usr/local"
-    "/opt/homebrew"
-)
+if(WIN32)
+    list(PREPEND CMAKE_PREFIX_PATH "${_csound_home}")
+else()
+    list(PREPEND CMAKE_PREFIX_PATH
+        "${_csound_home}"
+        "/usr/local"
+        "/opt/homebrew"
+    )
+endif()
 
 # ------------------------------------------------------------------------------
 # Executable
@@ -142,8 +158,12 @@ if(APPLE)
 endif()
 
 if(NOT CSOUND_LIBRARY)
+    set(_csound_library_names CsoundLib64 csound64 csound64-6.0)
+    if(WIN32)
+        list(APPEND _csound_library_names csound csound64.lib)
+    endif()
     find_library(CSOUND_LIBRARY
-        NAMES CsoundLib64 csound64 csound64-6.0
+        NAMES ${_csound_library_names}
         PATHS ${_csound_search_roots}
         PATH_SUFFIXES lib lib64
         NO_DEFAULT_PATH
@@ -160,7 +180,11 @@ if(NOT CSOUND_INCLUDE_DIR)
 endif()
 
 if(NOT CSOUND_LIBRARY)
-    find_library(CSOUND_LIBRARY NAMES CsoundLib64 csound64 csound64-6.0)
+    set(_csound_library_names_fallback CsoundLib64 csound64 csound64-6.0)
+    if(WIN32)
+        list(APPEND _csound_library_names_fallback csound)
+    endif()
+    find_library(CSOUND_LIBRARY NAMES ${_csound_library_names_fallback})
 endif()
 
 if(NOT CSOUND_INCLUDE_DIR)

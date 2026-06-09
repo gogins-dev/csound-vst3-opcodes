@@ -31,44 +31,23 @@ jobs:
             platform: linux
             build_dir: build-linux
             archive_glob: build-linux/*.zip
-          # Windows build is temporarily disabled, but kept here for re-enabling.
-          # - name: windows
-          #   runner: windows-latest
-          #   platform: windows
-          #   build_dir: build-windows
-          #   archive_glob: build-windows/*.zip
+          - name: windows
+            runner: windows-latest
+            platform: windows
+            build_dir: build-windows
+            archive_glob: build-windows/*.zip
 
     env:
       CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install
       CSOUND_CACHE_VERSION: csound7-develop-v6
+      # Windows-only: MSVC Csound (invalidates stale MinGW cache without touching Linux/macOS keys).
+      CSOUND_CACHE_VERSION_WINDOWS: csound7-develop-v7-msvc
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Set up MSYS2 - Windows
-        if: matrix.platform == 'windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          path-type: inherit
-          install: >-
-            base-devel
-            git
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-ccache
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-libsndfile
-            mingw-w64-x86_64-curl
-            mingw-w64-x86_64-liblo
-            mingw-w64-x86_64-portaudio
-            mingw-w64-x86_64-boost
-            mingw-w64-x86_64-tools
 
       - name: Install dependencies - macOS
         if: matrix.platform == 'macos'
@@ -132,7 +111,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          choco install -y 7zip
+          choco install -y winflexbison3 7zip
 
       - name: Resolve Csound develop commit
         id: csound-source
@@ -158,13 +137,21 @@ jobs:
             ~/Library/Frameworks/CsoundLib64.framework
           key: ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-${{ steps.csound-source.outputs.sha }}
 
-      - name: Cache Csound install - Linux/Windows
-        if: matrix.platform != 'macos'
-        id: cache-csound-other
+      - name: Cache Csound install - Linux
+        if: matrix.platform == 'linux'
+        id: cache-csound-linux
         uses: actions/cache@v4
         with:
           path: .cache/csound-install
           key: ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-${{ steps.csound-source.outputs.sha }}
+
+      - name: Cache Csound install - Windows
+        if: matrix.platform == 'windows'
+        id: cache-csound-windows
+        uses: actions/cache@v4
+        with:
+          path: .cache/csound-install
+          key: ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION_WINDOWS }}-${{ steps.csound-source.outputs.sha }}
 
       - name: Validate Csound cache - macOS/Linux
         if: matrix.platform != 'windows'
@@ -203,26 +190,29 @@ jobs:
       - name: Validate Csound cache - Windows
         if: matrix.platform == 'windows'
         id: validate-csound-cache-windows
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          valid=false
-          if [[ -x "${CSOUND_INSTALL_PREFIX}/bin/csound.exe" && -f "${CSOUND_INSTALL_PREFIX}/bin/csound64.dll" ]]
-          then
-              if find "${CSOUND_INSTALL_PREFIX}" -name 'libcsound64.dll.a' -o -name 'csound64.lib' -o -name 'libcsound64.lib' | grep -q .
-              then
-                  valid=true
-              fi
-          fi
-          echo "valid=${valid}" >> "${GITHUB_OUTPUT}"
-          if [[ "${valid}" == "true" ]]
-          then
-              echo "Using cached Csound install at ${CSOUND_INSTALL_PREFIX}"
-              "${CSOUND_INSTALL_PREFIX}/bin/csound.exe" --version || true
-          else
-              echo "Cached Csound install is missing or incomplete; rebuilding."
-              rm -rf "${CSOUND_INSTALL_PREFIX}"
-          fi
+          $P = $env:CSOUND_INSTALL_PREFIX
+          $exe = @(
+            (Join-Path $P "bin\csound64.exe"),
+            (Join-Path $P "bin\csound.exe")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $lib = @(
+            (Join-Path $P "lib\csound64.lib"),
+            (Join-Path $P "lib64\csound64.lib"),
+            (Join-Path $P "lib\csound.lib")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $dll = @(
+            (Join-Path $P "bin\csound64.dll")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $ok = 0
+          if ($exe -and $lib -and $dll) { $ok = 1 }
+          "valid=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ($ok -eq 1) {
+            & $exe --version
+          } else {
+            if (Test-Path $P) { Remove-Item -Recurse -Force $P }
+          }
 
       - name: Build and install Csound 7 from develop - macOS
         if: matrix.platform == 'macos' && steps.validate-csound-cache-unix.outputs.valid != 'true'
@@ -270,50 +260,29 @@ jobs:
           sudo ldconfig
 
       - name: Build and install Csound 7 from develop - Windows
-        if: matrix.platform == 'windows' && steps.validate-csound-cache-windows.outputs.valid != 'true'
-        shell: msys2 {0}
+        if: matrix.platform == 'windows' && steps.validate-csound-cache-windows.outputs.valid != '1'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          git clone --depth 1 --branch develop https://github.com/csound/csound.git csound-source
-          mkdir -p /usr/x86_64-w64-mingw32/lib
-          winpthread_dll="$(find /mingw64 /usr -name 'libwinpthread-1.dll' -print -quit || true)"
-          if [[ -z "${winpthread_dll}" ]]
-          then
-              echo "Could not find libwinpthread-1.dll." >&2
-              find / -name 'libwinpthread-1.dll' -print 2>/dev/null >&2 || true
-              exit 1
-          fi
-          cp -f "${winpthread_dll}" /usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll
-          ls -l /usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll
-          cmake -S csound-source -B csound-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${CSOUND_INSTALL_PREFIX}" \
-            -DBUILD_TESTS=OFF \
-            -DBUILD_JAVA_INTERFACE=OFF \
-            -DBUILD_PYTHON_INTERFACE=OFF \
-            -DBUILD_PYTHON_OPCODES=OFF \
-            -DUSE_PYTHON=OFF \
-            -DINSTALL_PYTHON_INTERFACE=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build csound-build --parallel
-          cmake --install csound-build
-          import_library="$(find "${CSOUND_INSTALL_PREFIX}" \( -name 'libcsound64.dll.a' -o -name 'csound64.lib' -o -name 'libcsound64.lib' \) | head -n 1 || true)"
-          if [[ -z "${import_library}" ]]
-          then
-              dll_path="$(find "${CSOUND_INSTALL_PREFIX}" -name 'csound64.dll' | head -n 1 || true)"
-              if [[ -z "${dll_path}" ]]
-              then
-                  echo "Could not find csound64.dll after Csound install." >&2
-                  exit 1
-              fi
-              mkdir -p "${CSOUND_INSTALL_PREFIX}/lib"
-              (
-                  cd "${CSOUND_INSTALL_PREFIX}/lib"
-                  gendef "${dll_path}"
-                  dlltool -d csound64.def -l libcsound64.dll.a -D csound64.dll
-              )
-          fi
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 --branch develop --recurse-submodules https://github.com/csound/csound.git csound-source
+          Push-Location csound-source
+          .\vcpkg\bootstrap-vcpkg.bat
+          cmake -B build -S . `
+            -DUSE_VCPKG=1 `
+            -DCUSTOM_CMAKE="./platform/windows/Custom-vs.cmake" `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_JAVA_INTERFACE=OFF `
+            -DBUILD_PYTHON_INTERFACE=OFF `
+            -DINSTALL_PYTHON_INTERFACE=OFF `
+            -DBUILD_PYTHON_OPCODES=OFF `
+            -DUSE_PYTHON=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --install build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
 
       - name: Add Csound to environment - macOS/Linux
         if: matrix.platform != 'windows'
@@ -326,12 +295,17 @@ jobs:
 
       - name: Add Csound to environment - Windows
         if: matrix.platform == 'windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          echo "${CSOUND_INSTALL_PREFIX}/bin" >> "${GITHUB_PATH}"
-          echo "${CSOUND_INSTALL_PREFIX}/lib" >> "${GITHUB_PATH}"
+          $bin = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"
+          $lib = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"
+          $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$bin;$lib;$lib64;$env:PATH"
+          Add-Content -Path $env:GITHUB_ENV -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"
 
       - name: Prepare ccache
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           ccache --zero-stats || true
@@ -343,16 +317,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ github.ref_name }}-
-            ccache-${{ runner.os }}-
-
-      - name: Cache ccache - Windows
-        if: matrix.platform == 'windows'
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.LOCALAPPDATA }}\ccache
           key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ github.ref_name }}-
@@ -422,25 +386,32 @@ jobs:
 
       - name: Configure - Windows
         if: matrix.platform == 'windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          rm -rf build-windows dist
-          csound_import_library="$(find "${CSOUND_INSTALL_PREFIX}" \( -name 'libcsound64.dll.a' -o -name 'csound64.lib' -o -name 'libcsound64.lib' \) | head -n 1 || true)"
-          if [[ -z "${csound_import_library}" ]]
-          then
-              echo "Could not find Csound import library in ${CSOUND_INSTALL_PREFIX}." >&2
-              exit 1
-          fi
-          cmake -S vst3-opcodes -B build-windows -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_INSTALL_PREFIX="$PWD/dist" \
-            -DCMAKE_PREFIX_PATH="${CSOUND_INSTALL_PREFIX};/mingw64" \
-            -DCSOUND_EXECUTABLE="${CSOUND_INSTALL_PREFIX}/bin/csound.exe" \
-            -DCSOUND_LIBRARY="${csound_import_library}" \
-            -DCSOUND_LIBRARIES="${csound_import_library}" \
+          $ErrorActionPreference = "Stop"
+          if (Test-Path build-windows) { Remove-Item -Recurse -Force build-windows }
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          $csoundExe = @(
+            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound64.exe"),
+            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound.exe")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Include @(
+            "csound64.lib", "libcsound64.lib"
+          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $csoundLib) {
+            throw "Could not find csound64.lib under $($env:CSOUND_INSTALL_PREFIX)"
+          }
+          $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
+          $prefixPath = @($env:CSOUND_INSTALL_PREFIX)
+          if (Test-Path $vcpkg) { $prefixPath += $vcpkg }
+          cmake -S vst3-opcodes -B build-windows `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$PWD/dist" `
+            -DCMAKE_PREFIX_PATH="$(($prefixPath -join ';'))" `
+            -DCSOUND_ROOT_HINT="$env:CSOUND_INSTALL_PREFIX" `
+            -DCSOUND_EXECUTABLE="$csoundExe" `
+            -DCSOUND_LIBRARY="$($csoundLib.FullName)" `
+            -DCSOUND_LIBRARIES="$($csoundLib.FullName)" `
             -DSMTG_USE_STDATOMIC_H=OFF
 
       - name: Build and locally install - macOS/Linux
@@ -452,7 +423,7 @@ jobs:
 
       - name: Build and locally install - Windows
         if: matrix.platform == 'windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
           cmake --build "${{ matrix.build_dir }}" --config Release --parallel --target stage_dist
           cmake --install "${{ matrix.build_dir }}" --config Release --prefix "$PWD/dist"
@@ -476,12 +447,12 @@ jobs:
 
       - name: Archive - Windows
         if: matrix.platform == 'windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
           cmake --build "${{ matrix.build_dir }}" --config Release --target archive_dist
 
       - name: Show ccache statistics
-        if: always()
+        if: always() && matrix.platform != 'windows'
         shell: bash
         run: |
           ccache --show-stats || true

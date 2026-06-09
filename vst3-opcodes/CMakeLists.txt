@@ -75,100 +75,61 @@ message(STATUS "CSOUND_AC_ENABLE_NOTARIZATION: ${CSOUND_AC_ENABLE_NOTARIZATION}"
 
 file(MAKE_DIRECTORY "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake")
 
-# Single source of truth: csound-ac (local checkout or downloaded master).
+# FindCsoundHomeFirst.cmake and OpcodeBaseAC.hpp: canonical source is csound-ac
+# (master). Vendored copies in this repo are offline fallbacks. On configure and
+# before each build, refresh from GitHub and replace those copies when download
+# succeeds.
+set(_find_csound_home_first_cmake "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake")
+set(_opcode_base_ac_hpp "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp")
+
+function(csound_vst3_fetch_csound_ac_file file_url_path dest_file)
+    set(_url "${CSOUND_AC_BASE_URL}/${file_url_path}")
+    string(CONCAT _url_arg "-DURL=" "${_url}")
+    string(CONCAT _dst_arg "-DDST=" "${dest_file}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" "${_url_arg}" "${_dst_arg}"
+                -P "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FetchCsoundACFile.cmake"
+    )
+    if(NOT EXISTS "${dest_file}")
+        message(FATAL_ERROR
+            "Missing csound-ac file (download failed and no vendored fallback): "
+            "${dest_file}")
+    endif()
+endfunction()
+
+message(STATUS "Refreshing FindCsoundHomeFirst.cmake and OpcodeBaseAC.hpp from csound-ac GitHub head...")
+csound_vst3_fetch_csound_ac_file(cmake/FindCsoundHomeFirst.cmake "${_find_csound_home_first_cmake}")
+csound_vst3_fetch_csound_ac_file(CsoundAC/OpcodeBaseAC.hpp "${_opcode_base_ac_hpp}")
+
+# codesign-check.bash: optional macOS release helper (local csound-ac or download).
 set(_csound_ac_repo_root "")
 if(DEFINED ENV{CSOUND_AC_ROOT} AND NOT "$ENV{CSOUND_AC_ROOT}" STREQUAL "")
     set(_csound_ac_repo_root "$ENV{CSOUND_AC_ROOT}")
-elseif(EXISTS "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/../csound-ac/cmake/FindCsoundHomeFirst.cmake")
+elseif(EXISTS "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/../csound-ac/external/codesign-check.bash")
     get_filename_component(_csound_ac_repo_root
         "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/../csound-ac" ABSOLUTE)
 endif()
 
-message(STATUS "Refreshing shared files from csound-ac...")
-
 if(_csound_ac_repo_root)
-    message(STATUS "Using local csound-ac checkout: ${_csound_ac_repo_root}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${_csound_ac_repo_root}/cmake/FindCsoundHomeFirst.cmake"
-            "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake"
+            "${_csound_ac_repo_root}/external/codesign-check.bash"
+            "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
     )
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${_csound_ac_repo_root}/CsoundAC/OpcodeBaseAC.hpp"
-            "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp"
+        COMMAND "${CMAKE_COMMAND}" -E chmod +x
+            "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
     )
-    if(EXISTS "${_csound_ac_repo_root}/external/codesign-check.bash")
-        execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${_csound_ac_repo_root}/external/codesign-check.bash"
-                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
-        )
-        execute_process(
-            COMMAND /bin/chmod +x
-                "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
-        )
-    endif()
 else()
-    message(STATUS "Downloading shared files from: ${CSOUND_AC_BASE_URL}")
     set(csound_ac_refresh_dir "${CMAKE_BINARY_DIR}/csound-ac-refresh")
     file(MAKE_DIRECTORY "${csound_ac_refresh_dir}")
-
-    file(DOWNLOAD
-        "${CSOUND_AC_BASE_URL}/cmake/FindCsoundHomeFirst.cmake"
-        "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
-        STATUS find_csound_download_status
-        SHOW_PROGRESS
-    )
-
-    list(GET find_csound_download_status 0 find_csound_download_code)
-
-    if(find_csound_download_code EQUAL 0)
-        execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${csound_ac_refresh_dir}/FindCsoundHomeFirst.cmake"
-                "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake"
-        )
-    else()
-        list(GET find_csound_download_status 1 find_csound_download_message)
-        message(WARNING
-            "Failed to refresh FindCsoundHomeFirst.cmake from csound-ac: "
-            "${find_csound_download_message}. Using existing copy in vst3-opcodes/cmake/."
-        )
-    endif()
-
-    file(DOWNLOAD
-        "${CSOUND_AC_BASE_URL}/CsoundAC/OpcodeBaseAC.hpp"
-        "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
-        STATUS opcode_base_download_status
-        SHOW_PROGRESS
-    )
-
-    list(GET opcode_base_download_status 0 opcode_base_download_code)
-
-    if(opcode_base_download_code EQUAL 0)
-        execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${csound_ac_refresh_dir}/OpcodeBaseAC.hpp"
-                "${CSOUND_VST3_OPCODE_SOURCE_DIR}/OpcodeBaseAC.hpp"
-        )
-    else()
-        list(GET opcode_base_download_status 1 opcode_base_download_message)
-        message(WARNING
-            "Failed to refresh OpcodeBaseAC.hpp from csound-ac: "
-            "${opcode_base_download_message}. Using existing OpcodeBaseAC.hpp."
-        )
-    endif()
-
     file(DOWNLOAD
         "${CSOUND_AC_BASE_URL}/external/codesign-check.bash"
         "${csound_ac_refresh_dir}/codesign-check.bash"
         STATUS codesign_check_download_status
         SHOW_PROGRESS
     )
-
     list(GET codesign_check_download_status 0 codesign_check_download_code)
-
     if(codesign_check_download_code EQUAL 0)
         execute_process(
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -176,7 +137,7 @@ else()
                 "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
         )
         execute_process(
-            COMMAND /bin/chmod +x
+            COMMAND "${CMAKE_COMMAND}" -E chmod +x
                 "${CSOUND_VST3_OPCODE_REPOSITORY_ROOT}/codesign-check.bash"
         )
     else()
@@ -188,7 +149,7 @@ else()
     endif()
 endif()
 
-include("${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FindCsoundHomeFirst.cmake")
+include("${_find_csound_home_first_cmake}")
 
 if(NOT CSOUND_FOUND)
     message(FATAL_ERROR "Csound was not found.")
@@ -240,19 +201,22 @@ smtg_enable_vst3_sdk()
 if(SMTG_WIN)
     set(SMTG_USE_STDATOMIC_H OFF CACHE BOOL "" FORCE)
 
-    find_file(CSOUND_VST3_OPCODE_WINPTHREAD_DLL
-        NAMES libwinpthread-1.dll
-        HINTS
-            "/mingw64/bin"
-            "/ucrt64/bin"
-            "/clang64/bin"
-        PATH_SUFFIXES bin
-    )
+    # MinGW-linked plugins need libwinpthread at runtime; MSVC builds do not.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        find_file(CSOUND_VST3_OPCODE_WINPTHREAD_DLL
+            NAMES libwinpthread-1.dll
+            HINTS
+                "/mingw64/bin"
+                "/ucrt64/bin"
+                "/clang64/bin"
+            PATH_SUFFIXES bin
+        )
 
-    if(CSOUND_VST3_OPCODE_WINPTHREAD_DLL)
-        message(STATUS "Using libwinpthread runtime: ${CSOUND_VST3_OPCODE_WINPTHREAD_DLL}")
-    else()
-        message(WARNING "libwinpthread-1.dll was not found; skipping Windows runtime bundle copy.")
+        if(CSOUND_VST3_OPCODE_WINPTHREAD_DLL)
+            message(STATUS "Using libwinpthread runtime: ${CSOUND_VST3_OPCODE_WINPTHREAD_DLL}")
+        else()
+            message(WARNING "libwinpthread-1.dll was not found; skipping Windows runtime bundle copy.")
+        endif()
     endif()
 endif()
 
@@ -297,7 +261,22 @@ elseif(SMTG_WIN)
     )
 endif()
 
+string(CONCAT _finder_url_arg "-DURL=" "${CSOUND_AC_BASE_URL}/cmake/FindCsoundHomeFirst.cmake")
+string(CONCAT _finder_dst_arg "-DDST=" "${_find_csound_home_first_cmake}")
+string(CONCAT _opcode_url_arg "-DURL=" "${CSOUND_AC_BASE_URL}/CsoundAC/OpcodeBaseAC.hpp")
+string(CONCAT _opcode_dst_arg "-DDST=" "${_opcode_base_ac_hpp}")
+add_custom_target(
+    csound_ac_fetch_files
+    COMMAND "${CMAKE_COMMAND}" "${_finder_url_arg}" "${_finder_dst_arg}"
+            -P "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FetchCsoundACFile.cmake"
+    COMMAND "${CMAKE_COMMAND}" "${_opcode_url_arg}" "${_opcode_dst_arg}"
+            -P "${CSOUND_VST3_OPCODE_SOURCE_DIR}/cmake/FetchCsoundACFile.cmake"
+    COMMENT "Refresh FindCsoundHomeFirst.cmake and OpcodeBaseAC.hpp from csound-ac GitHub head"
+    VERBATIM
+)
+
 add_library(vst3_plugins MODULE ${vst3_plugins_sources})
+add_dependencies(vst3_plugins csound_ac_fetch_files)
 smtg_target_setup_universal_binary(vst3_plugins)
 
 target_link_libraries(vst3_plugins

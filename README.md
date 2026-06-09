@@ -32,8 +32,10 @@ project for your own reasons, then...
 Do not directly build the VST3 SDK. It functions as a subdirectory of the 
 `csound-vst3-plugins` project. There are platform-specific shell scripts for 
 building this project. The following instructions are for macOS. Just 
-substitute `windows` or `linux`  for `macos` in the script filenames, 
-depending on your platform.
+substitute `windows` or `linux` for `macos` in the script filenames, 
+depending on your platform. On Windows, use `clean-build-windows.ps1` from a 
+Visual Studio x64 developer shell with `CSOUND_ROOT` pointing at an MSVC-built 
+Csound 7 install (same ABI as typical Windows Csound releases).
 
  1. Run `update-submodules.bash`, which ensures that the Git submodules 
     used by this project have been initialized and updated.
