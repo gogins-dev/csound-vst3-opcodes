@@ -476,12 +476,12 @@ struct vst3_plugin_t  {
         } else {
             plugin_sample_size = Steinberg::Vst::kSample32;
         }
-        // This is what actually allocates the audio buffers.
-        // HostProcessData looks up the Component's BusInfos and creates
-        // buffers accordingly. The hostProcessData number of inputs and
-        // outputs must already have been assigned.
-        hostProcessData.numInputs = 1;
-        hostProcessData.numOutputs = 1;
+        // HostProcessData::prepare creates buffers for every audio bus on
+        // the component (and sets numInputs/numOutputs from those counts).
+        // Plugins such as Organteq expose one stereo bus per manual; those
+        // aux buses must be prepared, activated, and mixed in vst3audio.
+        hostProcessData.numInputs = component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
+        hostProcessData.numOutputs = component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
         auto result = hostProcessData.prepare(*component, blockSize, plugin_sample_size);
         /// result = update_process_setup();
         csound->Message(csound, "vst3_plugin::create_audio_buffers: plugin_sample_size: %s\n", plugin_sample_size ? "64 bits" : "32 bits");
@@ -727,10 +727,16 @@ struct vst3_plugin_t  {
             result = configureBusArrangementsFromPlugin(component, processor);
             csound->Message(csound, "Setting bus arrangements from plugin returned %d.\n", result);
         }
-        result = component->activateBus(Steinberg::Vst::kEvent, Steinberg::Vst::kInput, 0, false);
-        result = component->activateBus(Steinberg::Vst::kEvent, Steinberg::Vst::kOutput, 0, false);
-        result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, false);
-        result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, false);
+        auto deactivate_all_buses = [&](Steinberg::Vst::MediaType media, Steinberg::Vst::BusDirection dir) {
+            const int32 n = component->getBusCount(media, dir);
+            for (int32 i = 0; i < n; ++i) {
+                component->activateBus(media, dir, i, false);
+            }
+        };
+        deactivate_all_buses(Steinberg::Vst::kEvent, Steinberg::Vst::kInput);
+        deactivate_all_buses(Steinberg::Vst::kEvent, Steinberg::Vst::kOutput);
+        deactivate_all_buses(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
+        deactivate_all_buses(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
         setup.processMode = Steinberg::Vst::kRealtime;
         setup.maxSamplesPerBlock = blockSize;
         setup.sampleRate = sampleRate;
@@ -743,10 +749,18 @@ struct vst3_plugin_t  {
         csound->Message(csound, "activateBus(kEvent, kInput, 0)  returned %d\n", result);
         result = component->activateBus(Steinberg::Vst::kEvent, Steinberg::Vst::kOutput, 0, true);
         csound->Message(csound, "activateBus(kEvent, kOutput, 0) returned %d\n", result);
-        result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
-        csound->Message(csound, "activateBus(kAudio, kInput, 0)  returned %d\n", result);
-        result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, 0, true);
-        csound->Message(csound, "activateBus(kAudio, kOutput, 0) returned %d\n", result);
+        {
+            const int32 n_in = component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
+            for (int32 i = 0; i < n_in; ++i) {
+                result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, i, true);
+                csound->Message(csound, "activateBus(kAudio, kInput, %d)  returned %d\n", i, result);
+            }
+            const int32 n_out = component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput);
+            for (int32 i = 0; i < n_out; ++i) {
+                result = component->activateBus(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, i, true);
+                csound->Message(csound, "activateBus(kAudio, kOutput, %d) returned %d\n", i, result);
+            }
+        }
         if (component->setActive(true) != Steinberg::kResultOk) {
             csound->Message(csound, "vst3_plugin_t::update_process_setup: setActive returned not OK.\n");
             return false;
@@ -1273,13 +1287,9 @@ struct VST3AUDIO :
     vst3_plugin_t *vst3_plugin;
     MYFLT zerodbfs;
     Steinberg::int32 opcode_input_channel_count;
-    Steinberg::int32 plugin_input_channel_count;
     Steinberg::int32 opcode_output_channel_count;
-    Steinberg::int32 plugin_output_channel_count;
-    Steinberg::Vst::Sample32 **plugin_input_channels_32;
-    Steinberg::Vst::Sample64 **plugin_input_channels_64;
-    Steinberg::Vst::Sample32 **plugin_output_channels_32;
-    Steinberg::Vst::Sample64 **plugin_output_channels_64;
+    Steinberg::int32 plugin_input_bus_count;
+    Steinberg::int32 plugin_output_bus_count;
     Steinberg::Vst::SymbolicSampleSizes plugin_sample_size;
     Steinberg::int32 frame_count;
     int init(CSOUND *csound) {
@@ -1294,37 +1304,24 @@ struct VST3AUDIO :
         // Because Csound and the plugin may not use the same sample word
         // size, allowance must be made for different buffer shapes and
         // sample word sizes, and the audio streams must be copied in and
-        // out sample for sample. Csound will try to match its input and
-        // output channels with the hosted plugin, and the maximum matching
-        // set will be used. Whether the HostProcessData busses are "Main"
-        // is not considered. The Csound instrument hosting this opcode
-        // may ignore or duplicate channels depending on documentation or
-        // experience.
+        // out sample for sample. When a plugin exposes several stereo
+        // output buses (Organteq manuals, etc.), vst3audio mixes matching
+        // channels across buses into the opcode outputs.
 
         // Allow for the first arg being the handle.
         opcode_input_channel_count = input_arg_count() - 1;
-        auto &process_data = vst3_plugin->hostProcessData;
-        if (process_data.numInputs > 0) {
-            // [bus][channel]
-            plugin_input_channel_count = process_data.inputs[0].numChannels;
-            plugin_input_channels_32 = process_data.inputs[0].channelBuffers32;
-            plugin_input_channels_64 = process_data.inputs[0].channelBuffers64;
-            log(csound, "vst3audio::init: opcode_input_channel_count:  %3d\n", opcode_input_channel_count);
-            log(csound, "vst3audio::init: plugin_input_channel_count:  %3d plugin_input_channels_32:  %p plugin_input_channels_64:  %p\n", plugin_input_channel_count, plugin_input_channels_32, plugin_input_channels_64);
-        } else {
-            log(csound, "vst3audio::init: no plugin input channels.\n");
-            plugin_input_channel_count = 0;
-        }
         opcode_output_channel_count = output_arg_count();
-        if (process_data.numOutputs > 0) {
-            plugin_output_channel_count = process_data.outputs[0].numChannels;
-            plugin_output_channels_32 = process_data.outputs[0].channelBuffers32;
-            plugin_output_channels_64 = process_data.outputs[0].channelBuffers64;
-            log(csound, "vst3audio::init: plugin_output_channel_count: %3d plugin_output_channels_32: %p plugin_output_channels_64: %p\n", plugin_output_channel_count, plugin_output_channels_32, plugin_output_channels_64);
-            log(csound, "vst3audio::init: opcode_output_channel_count: %3d\n", opcode_output_channel_count);
-        } else {
-            log(csound, "vst3audio::init: no plugin output channels.\n");
-            plugin_output_channel_count = 0;
+        auto &process_data = vst3_plugin->hostProcessData;
+        plugin_sample_size = static_cast<Steinberg::Vst::SymbolicSampleSizes>(vst3_plugin->plugin_sample_size);
+        plugin_input_bus_count = process_data.numInputs;
+        plugin_output_bus_count = process_data.numOutputs;
+        log(csound, "vst3audio::init: opcode_input_channel_count:  %3d  plugin_input_buses:  %3d\n",
+            opcode_input_channel_count, plugin_input_bus_count);
+        log(csound, "vst3audio::init: opcode_output_channel_count: %3d  plugin_output_buses: %3d\n",
+            opcode_output_channel_count, plugin_output_bus_count);
+        for (Steinberg::int32 bus = 0; bus < plugin_output_bus_count; ++bus) {
+            log(csound, "vst3audio::init: output bus %d channels: %d\n",
+                bus, process_data.outputs[bus].numChannels);
         }
         vst3_plugin->information(true);
         return result;
@@ -1340,89 +1337,60 @@ struct VST3AUDIO :
             log(csound, "vst3audio::audio: warning! ksmps (%d) != numSamples: %d\n", ksmps(), vst3_plugin->hostProcessData.numSamples);
             /// return NOTOK;
         }
-#if EVENT_TRACING
-        auto &data = vst3_plugin->hostProcessData;
-        if (data.inputEvents) {
-            const Steinberg::int32 numEvents = data.inputEvents->getEventCount();
-            for (Steinberg::int32 i = 0; i < numEvents; ++i) {
-                Steinberg::Vst::Event event;
-                if (data.inputEvents->getEvent(i, event) == Steinberg::kResultOk) {
-                    switch (event.type) {
-                case Steinberg::Vst::Event::kNoteOnEvent:
-                            std::printf("Note On:  Channel %d, Pitch %d, Velocity %.2f\n",
-                                        event.noteOn.channel,
-                                        event.noteOn.pitch,
-                                        event.noteOn.velocity);
-                        break;
-                case Steinberg::Vst::Event::kNoteOffEvent:
-                            std::printf("Note Off: Channel %d, Pitch %d, Velocity %.2f\n",
-                                        event.noteOff.channel,
-                                        event.noteOff.pitch,
-                                        event.noteOff.velocity);
-                        break;
-                case Steinberg::Vst::Event::kPolyPressureEvent:
-                            std::printf("Poly Pressure: Channel %d, Pitch %d, Pressure %.2f\n",
-                                        event.polyPressure.channel,
-                                        event.polyPressure.pitch,
-                                        std::printf("Other MIDI event type: %d\n", event.type);
-                                        event.polyPressure.pressure);
-                        break;
-                case Steinberg::Vst::Event::kDataEvent:
-                            std::printf("Data: byte 0 %d, byte 1 %d, byte 2 %.2f\n",
-                                        event.data.bytes[0],
-                                        event.data.bytes[1],
-                                        event.data.bytes[2]);
-                        break;
-                default:
-                        break;
-                    }
-                }
-            }
-        }
-#endif
-        // We must read or write every sample in the host buffers, but we
-        // must not access nonexistent samples in the opcode buffers. This
-        // assumes that the number of opcode channels is never greater than
-        // the number of plugin channels or that, if it is, no harm comes.
+        auto &process_data = vst3_plugin->hostProcessData;
+        // Copy opcode inputs into plugin input bus 0 (side-chain / fx).
         if (plugin_sample_size == Steinberg::Vst::kSample32) {
-            for (Steinberg::int32 channel_index_in = 0; channel_index_in < plugin_input_channel_count; ++channel_index_in) {
-                if (channel_index_in < opcode_input_channel_count) {
-                    for (Steinberg::int32 frame_index = 0; frame_index < frame_count; ++frame_index) {
-                        plugin_input_channels_32[channel_index_in][frame_index] = a_input_channels[channel_index_in][frame_index];
-#if PROCESS_TRACING
-                        log(csound, "vst3audio::audio in for 32 bits: sample[%4d][%4d]: opcode: %f plugin: %f\n",
-                            channel_index_in, frame_index, a_input_channels[channel_index_in][frame_index], plugin_input_channels_32[channel_index_in][frame_index]);
-#endif
+            if (plugin_input_bus_count > 0) {
+                auto &in_bus = process_data.inputs[0];
+                for (Steinberg::int32 ch = 0; ch < in_bus.numChannels; ++ch) {
+                    if (ch < opcode_input_channel_count && in_bus.channelBuffers32[ch]) {
+                        for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                            in_bus.channelBuffers32[ch][frame] = static_cast<Steinberg::Vst::Sample32>(a_input_channels[ch][frame]);
+                        }
                     }
                 }
             }
             vst3_plugin->process(current_time_in_frames);
-            for (Steinberg::int32 channel_index = 0; channel_index < plugin_output_channel_count; ++channel_index) {
-                for (Steinberg::int32 frame_index = 0; frame_index < frame_count; ++frame_index) {
-                    /// a_output_channels[channel_index][frame_index] = static_cast<double>(plugin_output_channels_32[channel_index][frame_index]);
-                    if (channel_index < opcode_output_channel_count) {
-                        a_output_channels[channel_index][frame_index] = plugin_output_channels_32[channel_index][frame_index];
-#if PROCESS_TRACING
-                        log(csound, "vst3audio::audio out for 32 bits: sample[%4d][%4d]: opcode: %f plugin: %f\n",
-                            channel_index, frame_index, a_output_channels[channel_index][frame_index], plugin_output_channels_32[channel_index][frame_index]);
-#endif
+            for (Steinberg::int32 ch = 0; ch < opcode_output_channel_count; ++ch) {
+                for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                    a_output_channels[ch][frame] = 0;
+                }
+            }
+            for (Steinberg::int32 bus = 0; bus < plugin_output_bus_count; ++bus) {
+                auto &out_bus = process_data.outputs[bus];
+                for (Steinberg::int32 ch = 0; ch < out_bus.numChannels; ++ch) {
+                    if (ch < opcode_output_channel_count && out_bus.channelBuffers32[ch]) {
+                        for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                            a_output_channels[ch][frame] += out_bus.channelBuffers32[ch][frame];
+                        }
                     }
                 }
             }
         } else {
-            for (Steinberg::int32 channel_index_in = 0; channel_index_in < plugin_input_channel_count; ++channel_index_in) {
-                for (Steinberg::int32 frame_index = 0; frame_index < frame_count; ++frame_index) {
-                    plugin_input_channels_64[channel_index_in][frame_index] = a_input_channels[channel_index_in][frame_index];
+            if (plugin_input_bus_count > 0) {
+                auto &in_bus = process_data.inputs[0];
+                for (Steinberg::int32 ch = 0; ch < in_bus.numChannels; ++ch) {
+                    if (ch < opcode_input_channel_count && in_bus.channelBuffers64[ch]) {
+                        for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                            in_bus.channelBuffers64[ch][frame] = a_input_channels[ch][frame];
+                        }
+                    }
                 }
             }
             vst3_plugin->process(current_time_in_frames);
-            for (Steinberg::int32 channel_index = 0; channel_index < plugin_output_channel_count; ++channel_index) {
-                for (Steinberg::int32 frame_index = 0; frame_index < frame_count; ++frame_index) {
-                    a_output_channels[channel_index][frame_index] = plugin_output_channels_64[channel_index][frame_index];
-#if PROCESS_TRACING
-                    log(csound, "vst3audio::audio out for 64 bits: sample[%4d][%4d]: opcode: %f plugin: %f\n",
-                        channel_index, frame_index, a_output_channels[channel_index][frame_index], plugin_output_channels_64[channel_index][frame_index]);
-#endif
+            for (Steinberg::int32 ch = 0; ch < opcode_output_channel_count; ++ch) {
+                for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                    a_output_channels[ch][frame] = 0;
+                }
+            }
+            for (Steinberg::int32 bus = 0; bus < plugin_output_bus_count; ++bus) {
+                auto &out_bus = process_data.outputs[bus];
+                for (Steinberg::int32 ch = 0; ch < out_bus.numChannels; ++ch) {
+                    if (ch < opcode_output_channel_count && out_bus.channelBuffers64[ch]) {
+                        for (Steinberg::int32 frame = 0; frame < frame_count; ++frame) {
+                            a_output_channels[ch][frame] += out_bus.channelBuffers64[ch][frame];
+                        }
+                    }
                 }
             }
         }
