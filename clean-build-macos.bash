@@ -69,7 +69,7 @@ cmake -S "${repo_root}/vst3-opcodes" -B "${build_dir}" -G Ninja \
     -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES:-arm64}" \
     -DCMAKE_INSTALL_PREFIX="${install_dir}" \
     -DCMAKE_PREFIX_PATH="/Library;/Library/Frameworks;/opt/homebrew;/usr/local" \
-    -DCMAKE_FRAMEWORK_PATH="/Library/Frameworks;$HOME/Library/Frameworks" \
+    -DCMAKE_FRAMEWORK_PATH="/Library/Frameworks" \
     -DCMAKE_CXX_FLAGS="-Wno-error=unused-but-set-variable -Wno-error=deprecated-declarations" \
     ${launcher_args[@]+"${launcher_args[@]}"} \
     ${cmake_args[@]+"${cmake_args[@]}"}
